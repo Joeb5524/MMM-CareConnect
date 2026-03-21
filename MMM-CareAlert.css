@@ -1,0 +1,38 @@
+.mmm-care {
+    width: 520px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.mmm-care__btn {
+    width: 100%;
+    padding: 18px 16px;
+    border-radius: 18px;
+    border: 1px solid rgba(255,255,255,0.14);
+    background: rgba(255,255,255,0.08);
+    color: #fff;
+    font-size: 40px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: transform 120ms ease, background 120ms ease, opacity 120ms ease;
+}
+
+.mmm-care__btn:active {
+    transform: scale(0.995);
+}
+
+.mmm-care__btn:hover {
+    background: rgba(255,255,255,0.12);
+}
+
+.mmm-care__status {
+    font-size: 22px;
+    opacity: 0.85;
+    min-height: 26px;
+}
+
+.mmm-care__status--idle { opacity: 0; }
+.mmm-care__status--sending { opacity: 0.9; }
+.mmm-care__status--sent { opacity: 1; font-weight: 800; }
+.mmm-care__status--error { opacity: 1; font-weight: 800; }
