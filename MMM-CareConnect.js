@@ -1,62 +1,42 @@
 /* global Module */
+
 Module.register("MMM-CareConnect", {
     defaults: {
-        header: "Care",
-
-        // Hub connection
         hubBasePath: "/mm-simple-remote",
-        hubUrl: "",              // e.g. "https://mirror.local:8080"
-        mirrorToken: "",         // must match hub config.mirrorToken (or env SR_MIRROR_TOKEN)
-
-        // Panels
-        showAlerts: true,
-        showCalling: true,
-
-        // Alerts
-        alertTransport: "http",  // "http" | "notification"
-        alertTitle: "Mirror alert",
+        hubUrl: "",
+        mirrorToken: "",
+        deviceName: "",
+        pollMs: 1000,
+        stunServers: [{ urls: "stun:stun.l.google.com:19302" }],
         alertButtons: [
             { label: "Need help", message: "I need assistance.", level: "help" },
             { label: "Call me", message: "Please call me when you can.", level: "call" }
         ],
-        alertConfirmMs: 2500,
-
-        // Calling
-        pollIntervalMs: 1500,
-        callButtonLabel: "Start audio call",
-        hangupButtonLabel: "Hang up",
-        answerTimeoutMs: 45000,
-        stunServers: [{ urls: "stun:stun.l.google.com:19302" }],
-        autoSendAlertOnCallFailure: true,
-        autoBusyReject: true,
-        ringtone: { enabled: true, intervalMs: 1200, toneHz: 880, toneMs: 180 }
+        showCallButton: true
     },
 
     start() {
-        // Alert UI state
-        this._alertStatus = { state: "idle", text: "" }; // idle|sending|sent|error
+        this.state = {
+            status: "idle",
+            info: "",
+            lastError: "",
+            lastAlertSentAt: 0,
 
-        // Call state
-        this._callState = "idle"; // idle|creating|ringing|incoming|in_call|ending|error
-        this._callStatusText = "";
-        this._sessionId = null;
-        this._incomingOffer = null;
+            incoming: null, // { id, offer }
+            sessionId: null,
 
-        this._pc = null;
-        this._localStream = null;
-        this._remoteStream = null;
-        this._remoteAudioEl = null;
+            pc: null,
+            localStream: null,
+            iceSince: 0,
+            pendingLocalIce: [],
 
-        this._answerDeadlineAt = 0;
-        this._pollTimer = null;
-        this._answerPollTimer = null;
-        this._icePollTimer = null;
-        this._iceCarerIdx = 0;
+            pollTimer: null,
+            answerTimer: null,
+            iceTimer: null
+        };
 
-        this._ringtoneTimer = null;
-        this._audioCtx = null;
-
-        if (this.config.showCalling) this._startIncomingPoll();
+        this._schedulePoll();
+        this.updateDom(0);
     },
 
     getStyles() {
@@ -64,439 +44,229 @@ Module.register("MMM-CareConnect", {
     },
 
     notificationReceived(notification, payload) {
-        if (notification === "SR_CARE_ALERT") {
-            this._sendAlert({
-                title: (payload && payload.title) || this.config.alertTitle,
-                message: (payload && payload.message) || "Assistance requested from the mirror.",
-                level: (payload && payload.level) || "help"
-            });
-            return;
-        }
-
-        // Voice control friendly calling.
-        if (notification === "AUDIOCALL_START_REQUEST") {
-            this._startOutgoing((payload && payload.reason) ? String(payload.reason) : "request");
-            return;
-        }
-        if (notification === "AUDIOCALL_END_REQUEST") {
-            this._endCall("ended_by_request");
-            return;
-        }
-        if (notification === "AUDIOCALL_ACCEPT_REQUEST") {
-            this._acceptIncoming((payload && payload.reason) ? String(payload.reason) : "request");
-            return;
-        }
-        if (notification === "AUDIOCALL_DECLINE_REQUEST") {
-            this._declineIncoming((payload && payload.reason) ? String(payload.reason) : "request");
-            return;
+        if (notification === "AUDIOCALL_START_REQUEST") this._startCall();
+        if (notification === "AUDIOCALL_ACCEPT_REQUEST") this._acceptIncoming();
+        if (notification === "AUDIOCALL_DECLINE_REQUEST") this._declineIncoming();
+        if (notification === "AUDIOCALL_HANGUP_REQUEST") this._hangup("voice_hangup");
+        if (notification === "CARE_ALERT_SEND" && payload && payload.message) {
+            this._sendCareAlert(String(payload.message), payload.level || "help");
         }
     },
 
     getDom() {
         const root = document.createElement("div");
-        root.className = "mmm-careconnect";
+        root.className = "cc-root";
 
         const header = document.createElement("div");
         header.className = "cc-header";
-        header.textContent = String(this.config.header || "Care");
+        header.textContent = "Care";
         root.appendChild(header);
 
-        if (this.config.showAlerts) root.appendChild(this._renderAlertsPanel());
-        if (this.config.showCalling) root.appendChild(this._renderCallingPanel());
+        const err = document.createElement("div");
+        err.className = "cc-error";
+        err.style.display = this.state.lastError ? "block" : "none";
+        err.textContent = this.state.lastError || "";
+        root.appendChild(err);
+
+        const status = document.createElement("div");
+        status.className = "cc-status";
+        status.textContent = this._statusText();
+        root.appendChild(status);
+
+        const btnGrid = document.createElement("div");
+        btnGrid.className = "cc-grid";
+
+        (this.config.alertButtons || []).forEach((b) => {
+            const btn = document.createElement("button");
+            btn.className = "cc-btn cc-btn-alert";
+            btn.textContent = b.label || "Alert";
+            btn.onclick = () => this._sendCareAlert(b.message || "I need assistance.", b.level || "help");
+            btnGrid.appendChild(btn);
+        });
+
+        if (this.config.showCallButton) {
+            const callBtn = document.createElement("button");
+            callBtn.className = "cc-btn cc-btn-call";
+            callBtn.textContent = this.state.sessionId ? "Hang up" : "Call carer";
+            callBtn.onclick = () => (this.state.sessionId ? this._hangup("mirror_hangup") : this._startCall());
+            btnGrid.appendChild(callBtn);
+        }
+
+        root.appendChild(btnGrid);
+
+        
+        if (this.state.incoming && this.state.incoming.id) {
+            const overlay = document.createElement("div");
+            overlay.className = "cc-incoming";
+
+            const t = document.createElement("div");
+            t.className = "cc-incoming-title";
+            t.textContent = "Incoming call";
+            overlay.appendChild(t);
+
+            const actions = document.createElement("div");
+            actions.className = "cc-incoming-actions";
+
+            const accept = document.createElement("button");
+            accept.className = "cc-btn cc-btn-accept";
+            accept.textContent = "Accept";
+            accept.onclick = () => this._acceptIncoming();
+
+            const decline = document.createElement("button");
+            decline.className = "cc-btn cc-btn-decline";
+            decline.textContent = "Decline";
+            decline.onclick = () => this._declineIncoming();
+
+            actions.appendChild(accept);
+            actions.appendChild(decline);
+            overlay.appendChild(actions);
+
+            root.appendChild(overlay);
+        }
+
+       
+        const audio = document.createElement("audio");
+        audio.autoplay = true;
+        audio.playsInline = true;
+        audio.className = "cc-audio";
+        audio.id = "ccRemoteAudio";
+        root.appendChild(audio);
 
         return root;
     },
 
-    _renderAlertsPanel() {
-        const panel = document.createElement("div");
-        panel.className = "cc-panel";
-
-        const title = document.createElement("div");
-        title.className = "cc-panel__title";
-        title.textContent = "Alerts";
-        panel.appendChild(title);
-
-        const btnRow = document.createElement("div");
-        btnRow.className = "cc-row";
-
-        (Array.isArray(this.config.alertButtons) ? this.config.alertButtons : []).forEach((btn) => {
-            const b = document.createElement("button");
-            b.className = "cc-btn";
-            b.textContent = btn && btn.label ? String(btn.label) : "Alert";
-            b.disabled = this._alertStatus.state === "sending";
-            b.onclick = () => this._sendAlert({
-                title: this.config.alertTitle,
-                message: btn && btn.message ? String(btn.message) : "Assistance requested from the mirror.",
-                level: btn && btn.level ? String(btn.level) : "help"
-            });
-            btnRow.appendChild(b);
-        });
-
-        panel.appendChild(btnRow);
-
-        const status = document.createElement("div");
-        status.className = "cc-status";
-        status.textContent = this._alertStatus.text || "";
-        panel.appendChild(status);
-
-        return panel;
-    },
-
-    _renderCallingPanel() {
-        const panel = document.createElement("div");
-        panel.className = "cc-panel";
-
-        const title = document.createElement("div");
-        title.className = "cc-panel__title";
-        title.textContent = "Audio call";
-        panel.appendChild(title);
-
-        const row = document.createElement("div");
-        row.className = "cc-row";
-
-        const callBtn = document.createElement("button");
-        callBtn.className = "cc-btn";
-        callBtn.textContent = String(this.config.callButtonLabel || "Start audio call");
-        callBtn.disabled = !(this._callState === "idle" || this._callState === "error");
-        callBtn.onclick = () => this._startOutgoing("button");
-        row.appendChild(callBtn);
-
-        const acceptBtn = document.createElement("button");
-        acceptBtn.className = "cc-btn";
-        acceptBtn.textContent = "Accept";
-        acceptBtn.disabled = !(this._callState === "incoming");
-        acceptBtn.onclick = () => this._acceptIncoming("button");
-        row.appendChild(acceptBtn);
-
-        const declineBtn = document.createElement("button");
-        declineBtn.className = "cc-btn";
-        declineBtn.textContent = "Decline";
-        declineBtn.disabled = !(this._callState === "incoming");
-        declineBtn.onclick = () => this._declineIncoming("button");
-        row.appendChild(declineBtn);
-
-        const hangupBtn = document.createElement("button");
-        hangupBtn.className = "cc-btn";
-        hangupBtn.textContent = String(this.config.hangupButtonLabel || "Hang up");
-        hangupBtn.disabled = !(this._callState === "ringing" || this._callState === "in_call" || this._callState === "creating" || this._callState === "incoming");
-        hangupBtn.onclick = () => this._endCall("hangup");
-        row.appendChild(hangupBtn);
-
-        panel.appendChild(row);
-
-        const status = document.createElement("div");
-        status.className = "cc-status";
-        status.textContent = this._callStatusText || this._humanCallState(this._callState);
-        panel.appendChild(status);
-
-        const audio = document.createElement("audio");
-        audio.autoplay = true;
-        audio.playsInline = true;
-        audio.controls = false;
-        if (this._remoteStream) audio.srcObject = this._remoteStream;
-        this._remoteAudioEl = audio;
-        panel.appendChild(audio);
-
-        return panel;
-    },
+    // --------- HTTP helpers ----------
 
     _hubBase() {
-        const basePath = (this.config.hubBasePath || "/mm-simple-remote").startsWith("/")
-            ? this.config.hubBasePath
-            : `/${this.config.hubBasePath}`;
+        const basePath = String(this.config.hubBasePath || "/mm-simple-remote").trim() || "/mm-simple-remote";
+        const path = basePath.startsWith("/") ? basePath : `/${basePath}`;
+        const hubUrl = String(this.config.hubUrl || "").trim();
 
-        if (this.config.hubUrl && typeof this.config.hubUrl === "string" && this.config.hubUrl.trim()) {
-            return `${this.config.hubUrl.replace(/\/+$/, "")}${basePath}`;
-        }
-
-        const origin = window.location && window.location.origin ? window.location.origin : "";
-        return `${origin}${basePath}`;
+        if (!hubUrl) return path.replace(/\/+$/, "");
+        return `${hubUrl.replace(/\/+$/, "")}${path.replace(/\/+$/, "")}`;
     },
 
-    async _hubFetch(path, opts) {
+    async _mirrorFetch(path, opts) {
+        const token = String(this.config.mirrorToken || "").trim();
+        const url = `${this._hubBase()}${path}`;
         const headers = Object.assign({ "Content-Type": "application/json" }, (opts && opts.headers) || {});
-        if (this.config.mirrorToken) headers["x-mirror-token"] = String(this.config.mirrorToken);
+        if (token) headers["X-Mirror-Token"] = token;
 
-        const res = await fetch(`${this._hubBase()}${path}`, Object.assign({}, opts || {}, { headers }));
-        const json = await res.json().catch(() => null);
-        return { ok: res.ok, status: res.status, json };
+        const res = await fetch(url, Object.assign({
+            method: "GET",
+            headers
+        }, opts || {}));
+
+        const text = await res.text();
+        let json = null;
+        try { json = JSON.parse(text); } catch (_) {}
+        return { ok: res.ok, status: res.status, json, raw: text };
     },
 
-    // Alerts
-    async _sendAlert(payload) {
-        this._alertStatus = { state: "sending", text: "Sending…" };
-        this.updateDom(0);
-
-        try {
-            if (this.config.alertTransport === "notification") {
-                this.sendNotification("SR_CARE_ALERT", payload);
-                this._alertStatus = { state: "sent", text: "Sent ✓" };
-                this.updateDom(0);
-                return this._autoClearAlert();
-            }
-
-            const res = await this._hubFetch("/api/mirror/care-alert", {
-                method: "POST",
-                body: JSON.stringify(payload)
-            });
-
-            if (!res.ok || !res.json || !res.json.ok) throw new Error("send_failed");
-
-            this._alertStatus = { state: "sent", text: "Sent ✓" };
-            this.updateDom(0);
-            return this._autoClearAlert();
-        } catch (e) {
-            this._alertStatus = { state: "error", text: "Failed to send" };
-            this.updateDom(0);
-        }
+    _deviceName() {
+        const fromCfg = String(this.config.deviceName || "").trim();
+        if (fromCfg) return fromCfg;
+        return (typeof window !== "undefined" && window.location && window.location.hostname) ? window.location.hostname : "mirror";
     },
 
-    _autoClearAlert() {
-        setTimeout(() => {
-            if (this._alertStatus.state === "sent") {
-                this._alertStatus = { state: "idle", text: "" };
-                this.updateDom(0);
-            }
-        }, Math.max(400, Number(this.config.alertConfirmMs) || 2500));
-    },
-    
-    // Calling
-
-    _humanCallState(state) {
-        if (state === "idle") return "Ready";
-        if (state === "creating") return "Starting…";
-        if (state === "ringing") return "Calling…";
-        if (state === "incoming") return "Incoming call";
-        if (state === "in_call") return "In call";
-        if (state === "ending") return "Ending…";
-        if (state === "error") return "Error";
-        return state;
-    },
-
-    _setCallState(state, statusText) {
-        this._callState = state;
-        if (typeof statusText === "string") this._callStatusText = statusText;
+    _setError(msg) {
+        this.state.lastError = msg || "";
         this.updateDom(0);
     },
 
-    _startIncomingPoll() {
-        if (this._pollTimer) clearInterval(this._pollTimer);
-        this._pollTimer = setInterval(
-            () => this._pollIncoming(),
-            Math.max(700, Number(this.config.pollIntervalMs) || 1500)
-        );
+    _statusText() {
+        if (this.state.incoming) return "Incoming call…";
+        if (this.state.sessionId && this.state.status === "calling") return "Calling…";
+        if (this.state.sessionId && this.state.status === "ringing") return "Ringing…";
+        if (this.state.sessionId && this.state.status === "in_call") return "In call";
+        return "Idle";
     },
 
-    async _pollIncoming() {
-        if (this._callState !== "idle") return;
-
-        const res = await this._hubFetch("/api/mirror/rtc/pending", { method: "GET" });
-        if (!res.ok || !res.json || !res.json.ok) return;
-
-        const item = res.json.item;
-        if (!item || !item.id || !item.offer) return;
-
-        if (this.config.autoBusyReject && this._callState !== "idle") return;
-
-        this._sessionId = String(item.id);
-        this._incomingOffer = item.offer;
-        this._setCallState("incoming", "Incoming call…");
-        this._startRingtone();
-
-        this._answerDeadlineAt = Date.now() + Math.max(5000, Number(this.config.answerTimeoutMs) || 45000);
-        setTimeout(() => {
-            if (this._callState === "incoming" && Date.now() >= this._answerDeadlineAt) {
-                this._declineIncoming("timeout");
-            }
-        }, Math.max(800, Number(this.config.answerTimeoutMs) || 45000) + 50);
+    _schedulePoll() {
+        if (this.state.pollTimer) clearInterval(this.state.pollTimer);
+        this.state.pollTimer = setInterval(() => this._pollPending(), Math.max(500, this.config.pollMs || 1000));
     },
 
-    async _startOutgoing(reason) {
-        if (!(this._callState === "idle" || this._callState === "error")) return;
-
-        this._callStatusText = "";
-        this._sessionId = null;
-        this._incomingOffer = null;
-        this._iceCarerIdx = 0;
-        this._setCallState("creating", "Starting…");
-
+    async _pollPending() {
         try {
-            await this._createPeerConnection();
-
-            const offer = await this._pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: false });
-            await this._pc.setLocalDescription(offer);
-
-            const res = await this._hubFetch("/api/mirror/rtc/create", {
-                method: "POST",
-                body: JSON.stringify({ mode: "audio", offer: { type: offer.type, sdp: offer.sdp } })
-            });
-
-            if (!res.ok || !res.json || !res.json.ok || !res.json.sessionId) throw new Error("create_failed");
-
-            this._sessionId = String(res.json.sessionId);
-            this._setCallState("ringing", "Calling…");
-
-            this._answerDeadlineAt = Date.now() + Math.max(5000, Number(this.config.answerTimeoutMs) || 45000);
-            this._startAnswerPolling();
-            this._startIcePolling();
-        } catch (e) {
-            await this._hardStopCall("start_failed");
-            this._setCallState("error", "Call failed");
-
-            if (this.config.autoSendAlertOnCallFailure) {
-                this._sendAlert({
-                    title: "Mirror call failed",
-                    message: "Audio call failed to start.",
-                    level: "call"
-                });
-            }
-        }
-    },
-
-    async _acceptIncoming(reason) {
-        if (this._callState !== "incoming" || !this._sessionId || !this._incomingOffer) return;
-        this._stopRingtone();
-
-        try {
-            await this._createPeerConnection(true);
-
-            await this._pc.setRemoteDescription(new RTCSessionDescription(this._incomingOffer));
-            const answer = await this._pc.createAnswer();
-            await this._pc.setLocalDescription(answer);
-
-            const res = await this._hubFetch(`/api/mirror/rtc/${encodeURIComponent(this._sessionId)}/answer`, {
-                method: "POST",
-                body: JSON.stringify({ sdp: { type: answer.type, sdp: answer.sdp } })
-            });
-            if (!res.ok || !res.json || !res.json.ok) throw new Error("answer_failed");
-
-            this._setCallState("in_call", "Connecting…");
-            this._startIcePolling();
-        } catch (e) {
-            await this._hardStopCall("accept_failed");
-            this._setCallState("error", "Failed to answer");
-        }
-    },
-
-    async _declineIncoming(reason) {
-        if (this._callState !== "incoming" || !this._sessionId) return;
-        this._stopRingtone();
-
-        await this._hubFetch(`/api/mirror/rtc/${encodeURIComponent(this._sessionId)}/decline`, {
-            method: "POST",
-            body: JSON.stringify({ reason: String(reason || "decline") })
-        });
-
-        await this._hardStopCall("declined");
-        this._setCallState("idle", "Declined");
-        setTimeout(() => this._setCallState("idle", ""), 1200);
-    },
-
-    async _endCall(reason) {
-        if (!this._sessionId) {
-            await this._hardStopCall(reason || "ended");
-            this._setCallState("idle", "");
-            return;
-        }
-
-        await this._hubFetch(`/api/mirror/rtc/${encodeURIComponent(this._sessionId)}/end`, {
-            method: "POST",
-            body: JSON.stringify({ reason: String(reason || "end") })
-        });
-
-        await this._hardStopCall(reason || "ended");
-        this._setCallState("idle", "");
-    },
-
-    _startAnswerPolling() {
-        if (this._answerPollTimer) clearInterval(this._answerPollTimer);
-
-        this._answerPollTimer = setInterval(async () => {
-            if (!this._sessionId || !(this._callState === "ringing" || this._callState === "creating")) return;
-
-            if (Date.now() > this._answerDeadlineAt) {
-                await this._endCall("timeout");
-                this._setCallState("error", "No answer");
-                return;
-            }
-
-            const res = await this._hubFetch(`/api/mirror/rtc/${encodeURIComponent(this._sessionId)}/answer`, { method: "GET" });
-            if (!res.ok || !res.json || !res.json.ok) return;
-
-            if (res.json.declinedAt || res.json.endedAt) {
-                await this._endCall("declined");
-                this._setCallState("error", "Declined");
-                return;
-            }
-
-            if (!res.json.sdp) return;
-
-            try {
-                await this._pc.setRemoteDescription(new RTCSessionDescription(res.json.sdp));
-                this._setCallState("in_call", "In call");
-                clearInterval(this._answerPollTimer);
-                this._answerPollTimer = null;
-            } catch (e) {
-                await this._endCall("bad_answer");
-                this._setCallState("error", "Bad answer");
-            }
-        }, 1200);
-    },
-
-    _startIcePolling() {
-        if (this._icePollTimer) clearInterval(this._icePollTimer);
-
-        this._icePollTimer = setInterval(async () => {
-            if (!this._sessionId || !this._pc) return;
-            if (!(this._callState === "ringing" || this._callState === "incoming" || this._callState === "in_call" || this._callState === "creating")) return;
-
-            const res = await this._hubFetch(
-                `/api/mirror/rtc/${encodeURIComponent(this._sessionId)}/ice?since=${encodeURIComponent(String(this._iceCarerIdx))}`,
-                { method: "GET" }
-            );
-            if (!res.ok || !res.json || !res.json.ok || !Array.isArray(res.json.items)) return;
-
-            const items = res.json.items;
-            const next = Number.isFinite(Number(res.json.next)) ? Number(res.json.next) : (this._iceCarerIdx + items.length);
-
-            for (const c of items) {
-                try {
-                    await this._pc.addIceCandidate(new RTCIceCandidate(c));
-                } catch (e) {
-                    // ignore
+            if (this.state.sessionId) return; 
+            const res = await this._mirrorFetch(`/api/mirror/rtc/pending?device=${encodeURIComponent(this._deviceName())}`);
+            if (!res || !res.ok || !res.json) return;
+            const items = Array.isArray(res.json.items) ? res.json.items : [];
+            if (!items.length) {
+                if (this.state.incoming) {
+                    this.state.incoming = null;
+                    this.updateDom(0);
                 }
+                return;
             }
+            const first = items[0];
+            if (!first || !first.id || !first.offer) return;
+            if (this.state.incoming && this.state.incoming.id === first.id) return;
 
-            this._iceCarerIdx = Math.max(this._iceCarerIdx, next);
-        }, 1000);
+            this.state.incoming = { id: String(first.id), offer: first.offer };
+            this._setError("");
+        } catch (_) {
+        } finally {
+            this.updateDom(0);
+        }
     },
 
-    async _createPeerConnection(isIncoming) {
-        await this._hardStopCall("recreate");
+    // --------- Care alerts ----------
 
-        const pc = new RTCPeerConnection({ iceServers: this.config.stunServers || [] });
-        this._pc = pc;
-
-        let stream = null;
+    async _sendCareAlert(message, level) {
         try {
-            stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-            this._localStream = stream;
-            stream.getTracks().forEach((t) => pc.addTrack(t, stream));
-            pc.addTransceiver("audio", { direction: "sendrecv" });
+            this._setError("");
+            const now = Date.now();
+            if (now - this.state.lastAlertSentAt < 800) return;
+            this.state.lastAlertSentAt = now;
+
+            const res = await this._mirrorFetch("/api/mirror/care-alert", {
+                method: "POST",
+                body: JSON.stringify({
+                    device: this._deviceName(),
+                    message: String(message || "I need assistance."),
+                    level: String(level || "help")
+                })
+            });
+
+            if (!res.ok) {
+                this._setError("Failed to send alert.");
+                return;
+            }
+            this.state.info = "Alert sent ✓";
         } catch (e) {
-            pc.addTransceiver("audio", { direction: "recvonly" });
+            this._setError(`Alert failed: ${e && e.message ? e.message : String(e)}`);
+        } finally {
+            this.updateDom(0);
+            setTimeout(() => { this.state.info = ""; this.updateDom(0); }, 2500);
         }
+    },
+
+    // --------- WebRTC ----------
+
+    async _createPc() {
+        const pc = new RTCPeerConnection({ iceServers: this.config.stunServers || [] });
+        this.state.pc = pc;
 
         pc.ontrack = (evt) => {
             if (!evt || !evt.streams || !evt.streams[0]) return;
-            this._remoteStream = evt.streams[0];
-            if (this._remoteAudioEl) this._remoteAudioEl.srcObject = this._remoteStream;
-            if (this._callState === "in_call") this.updateDom(0);
+            const el = document.getElementById("ccRemoteAudio");
+            if (!el) return;
+            el.srcObject = evt.streams[0];
+            try { el.play().catch(() => {}); } catch (_) {}
         };
 
         pc.onicecandidate = async (evt) => {
-            if (!evt || !evt.candidate || !this._sessionId) return;
-            await this._hubFetch(`/api/mirror/rtc/${encodeURIComponent(this._sessionId)}/ice`, {
+            if (!evt || !evt.candidate) return;
+
+            if (!this.state.sessionId) {
+                this.state.pendingLocalIce.push(evt.candidate);
+                while (this.state.pendingLocalIce.length > 250) this.state.pendingLocalIce.shift();
+                return;
+            }
+
+            await this._mirrorFetch(`/api/mirror/rtc/${encodeURIComponent(this.state.sessionId)}/ice`, {
                 method: "POST",
                 body: JSON.stringify({ candidate: evt.candidate })
             });
@@ -504,75 +274,214 @@ Module.register("MMM-CareConnect", {
 
         pc.onconnectionstatechange = () => {
             const s = pc.connectionState;
-            if (s === "connected" && this._callState !== "in_call") this._setCallState("in_call", "In call");
-            if (s === "failed" || s === "disconnected") {
-                if (this._callState !== "ending") this._setCallState("error", "Connection lost");
-            }
+            if (s === "connected") this.state.status = "in_call";
+            if (s === "failed" || s === "disconnected") this.state.status = "idle";
+            this.updateDom(0);
         };
+
+        return pc;
     },
 
-    async _hardStopCall(reason) {
-        this._stopRingtone();
-
-        if (this._answerPollTimer) clearInterval(this._answerPollTimer);
-        this._answerPollTimer = null;
-
-        if (this._icePollTimer) clearInterval(this._icePollTimer);
-        this._icePollTimer = null;
-
-        if (this._pc) {
-            try { this._pc.onicecandidate = null; this._pc.ontrack = null; } catch (e) {}
-            try { this._pc.close(); } catch (e) {}
-        }
-        this._pc = null;
-
-        if (this._localStream) {
-            try { this._localStream.getTracks().forEach((t) => t.stop()); } catch (e) {}
-        }
-        this._localStream = null;
-
-        this._remoteStream = null;
-        if (this._remoteAudioEl) this._remoteAudioEl.srcObject = null;
-
-        this._incomingOffer = null;
-        this._sessionId = null;
-        this._iceCarerIdx = 0;
-    },
-
-    _startRingtone() {
-        if (!this.config.ringtone || !this.config.ringtone.enabled) return;
-        this._stopRingtone();
-
+    async _attachMicIfPossible(pc) {
         try {
-            const ctx = new (window.AudioContext || window.webkitAudioContext)();
-            this._audioCtx = ctx;
-
-            const tick = () => {
-                if (!this._audioCtx) return;
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
-                osc.frequency.value = Number(this.config.ringtone.toneHz) || 880;
-                gain.gain.value = 0.06;
-                osc.connect(gain);
-                gain.connect(ctx.destination);
-                osc.start();
-                setTimeout(() => { try { osc.stop(); } catch (e) {} }, Math.max(60, Number(this.config.ringtone.toneMs) || 180));
-            };
-
-            tick();
-            this._ringtoneTimer = setInterval(tick, Math.max(500, Number(this.config.ringtone.intervalMs) || 1200));
-        } catch (e) {
-            // ignore
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            this.state.localStream = stream;
+            stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+            return { ok: true, mic: true };
+        } catch (_) {
+            pc.addTransceiver("audio", { direction: "recvonly" });
+            return { ok: true, mic: false };
         }
     },
 
-    _stopRingtone() {
-        if (this._ringtoneTimer) clearInterval(this._ringtoneTimer);
-        this._ringtoneTimer = null;
-
-        if (this._audioCtx) {
-            try { this._audioCtx.close(); } catch (e) {}
+    async _flushPendingIce() {
+        if (!this.state.sessionId) return;
+        const pending = Array.isArray(this.state.pendingLocalIce) ? this.state.pendingLocalIce : [];
+        this.state.pendingLocalIce = [];
+        for (const c of pending) {
+            await this._mirrorFetch(`/api/mirror/rtc/${encodeURIComponent(this.state.sessionId)}/ice`, {
+                method: "POST",
+                body: JSON.stringify({ candidate: c })
+            });
         }
-        this._audioCtx = null;
+    },
+
+    async _startCall() {
+        try {
+            if (this.state.sessionId) return;
+            this._setError("");
+
+            this.state.status = "calling";
+            this.updateDom(0);
+
+            const pc = await this._createPc();
+            await this._attachMicIfPossible(pc);
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            const res = await this._mirrorFetch("/api/mirror/rtc/create", {
+                method: "POST",
+                body: JSON.stringify({
+                    mode: "audio",
+                    device: this._deviceName(),
+                    sdp: pc.localDescription
+                })
+            });
+
+            if (!res.ok || !res.json || !res.json.sessionId) {
+                this._setError("Call start failed (hub).");
+                await this._hangup("start_failed");
+                return;
+            }
+
+            this.state.sessionId = String(res.json.sessionId);
+            await this._flushPendingIce();
+
+            this.state.status = "ringing";
+            this._startAnswerPolling();
+            this._startIcePolling();
+        } catch (e) {
+            this._setError(`Call failed: ${e && e.message ? e.message : String(e)}`);
+            await this._hangup("start_exception");
+        } finally {
+            this.updateDom(0);
+        }
+    },
+
+    async _acceptIncoming() {
+        try {
+            if (!this.state.incoming || !this.state.incoming.id || !this.state.incoming.offer) return;
+            if (this.state.sessionId) return;
+
+            this._setError("");
+            this.state.sessionId = String(this.state.incoming.id);
+            const offer = this.state.incoming.offer;
+            this.state.incoming = null;
+
+            this.state.status = "calling";
+            this.updateDom(0);
+
+            const pc = await this._createPc();
+            await this._attachMicIfPossible(pc);
+
+            await pc.setRemoteDescription(offer);
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+
+            const post = await this._mirrorFetch(`/api/mirror/rtc/${encodeURIComponent(this.state.sessionId)}/answer`, {
+                method: "POST",
+                body: JSON.stringify({ sdp: pc.localDescription })
+            });
+
+            if (!post.ok) {
+                this._setError("Failed to answer (hub).");
+                await this._hangup("answer_failed");
+                return;
+            }
+
+            await this._flushPendingIce();
+            this.state.status = "in_call";
+            this._startIcePolling();
+        } catch (e) {
+            this._setError(`Answer failed: ${e && e.message ? e.message : String(e)}`);
+            await this._hangup("answer_exception");
+        } finally {
+            this.updateDom(0);
+        }
+    },
+
+    async _declineIncoming() {
+        try {
+            if (!this.state.incoming || !this.state.incoming.id) {
+                this.state.incoming = null;
+                this.updateDom(0);
+                return;
+            }
+
+            await this._mirrorFetch(`/api/mirror/rtc/${encodeURIComponent(this.state.incoming.id)}/decline`, { method: "POST" });
+        } catch (_) {}
+        this.state.incoming = null;
+        this.updateDom(0);
+    },
+
+    _startAnswerPolling() {
+        if (this.state.answerTimer) clearInterval(this.state.answerTimer);
+        this.state.answerTimer = setInterval(() => this._pollAnswer(), 900);
+    },
+
+    _startIcePolling() {
+        if (this.state.iceTimer) clearInterval(this.state.iceTimer);
+        this.state.iceTimer = setInterval(() => this._pollCarerIce(), 800);
+    },
+
+    async _pollAnswer() {
+        try {
+            if (!this.state.sessionId || !this.state.pc) return;
+            if (this.state.status === "in_call") return;
+
+            const res = await this._mirrorFetch(`/api/mirror/rtc/${encodeURIComponent(this.state.sessionId)}/answer`, { method: "GET" });
+            if (!res.ok || !res.json) return;
+
+            if (res.json.declinedAt || res.json.endedAt) {
+                await this._hangup("remote_end");
+                return;
+            }
+
+            if (res.json.answer && this.state.pc.signalingState !== "stable") {
+                await this.state.pc.setRemoteDescription(res.json.answer);
+                this.state.status = "in_call";
+                this.updateDom(0);
+            }
+        } catch (_) {}
+    },
+
+    async _pollCarerIce() {
+        try {
+            if (!this.state.sessionId || !this.state.pc) return;
+
+            const res = await this._mirrorFetch(
+                `/api/mirror/rtc/${encodeURIComponent(this.state.sessionId)}/ice?since=${this.state.iceSince}&from=carer`,
+                { method: "GET" }
+            );
+            if (!res.ok || !res.json) return;
+
+            const items = Array.isArray(res.json.items) ? res.json.items : [];
+            for (const it of items) {
+                if (!it || !it.candidate) continue;
+                try { await this.state.pc.addIceCandidate(it.candidate); } catch (_) {}
+            }
+            this.state.iceSince = Number(res.json.next || this.state.iceSince) || this.state.iceSince;
+        } catch (_) {}
+    },
+
+    async _hangup(reason) {
+        try {
+            if (this.state.answerTimer) clearInterval(this.state.answerTimer);
+            if (this.state.iceTimer) clearInterval(this.state.iceTimer);
+            this.state.answerTimer = null;
+            this.state.iceTimer = null;
+
+            if (this.state.sessionId) {
+                await this._mirrorFetch(`/api/mirror/rtc/${encodeURIComponent(this.state.sessionId)}/end`, {
+                    method: "POST",
+                    body: JSON.stringify({ reason: String(reason || "hangup") })
+                });
+            }
+        } catch (_) {}
+
+        try { if (this.state.pc) this.state.pc.close(); } catch (_) {}
+        this.state.pc = null;
+
+        if (this.state.localStream) {
+            this.state.localStream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
+        }
+        this.state.localStream = null;
+
+        this.state.sessionId = null;
+        this.state.iceSince = 0;
+        this.state.pendingLocalIce = [];
+        this.state.status = "idle";
+        this.updateDom(0);
     }
 });
