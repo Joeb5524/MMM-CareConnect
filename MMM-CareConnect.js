@@ -69,8 +69,17 @@ Module.register("MMM-CareConnect", {
         root.appendChild(err);
 
         const status = document.createElement("div");
-        status.className = "cc-status";
-        status.textContent = this._statusText();
+        status.className = `cc-status ${this._statusClass()}`;
+
+        const statusDot = document.createElement("span");
+        statusDot.className = "cc-status-dot";
+        status.appendChild(statusDot);
+
+        const statusLabel = document.createElement("span");
+        statusLabel.className = "cc-status-label";
+        statusLabel.textContent = this._statusText();
+        status.appendChild(statusLabel);
+
         root.appendChild(status);
 
         const btnGrid = document.createElement("div");
@@ -94,7 +103,6 @@ Module.register("MMM-CareConnect", {
 
         root.appendChild(btnGrid);
 
-        
         if (this.state.incoming && this.state.incoming.id) {
             const overlay = document.createElement("div");
             overlay.className = "cc-incoming";
@@ -124,7 +132,6 @@ Module.register("MMM-CareConnect", {
             root.appendChild(overlay);
         }
 
-       
         const audio = document.createElement("audio");
         audio.autoplay = true;
         audio.playsInline = true;
@@ -159,7 +166,9 @@ Module.register("MMM-CareConnect", {
 
         const text = await res.text();
         let json = null;
-        try { json = JSON.parse(text); } catch (_) {}
+        try {
+            json = JSON.parse(text);
+        } catch (_) {}
         return { ok: res.ok, status: res.status, json, raw: text };
     },
 
@@ -175,11 +184,22 @@ Module.register("MMM-CareConnect", {
     },
 
     _statusText() {
-        if (this.state.incoming) return "Incoming call…";
-        if (this.state.sessionId && this.state.status === "calling") return "Calling…";
-        if (this.state.sessionId && this.state.status === "ringing") return "Ringing…";
+        if (this.state.lastError) return "Needs attention";
+        if (this.state.incoming) return "Incoming call...";
+        if (this.state.sessionId && this.state.status === "calling") return "Calling...";
+        if (this.state.sessionId && this.state.status === "ringing") return "Ringing...";
         if (this.state.sessionId && this.state.status === "in_call") return "In call";
+        if (this.state.info) return this.state.info;
         return "Idle";
+    },
+
+    _statusClass() {
+        if (this.state.lastError) return "cc-status-error";
+        if (this.state.incoming) return "cc-status-incoming";
+        if (this.state.sessionId && this.state.status === "calling") return "cc-status-calling";
+        if (this.state.sessionId && this.state.status === "ringing") return "cc-status-ringing";
+        if (this.state.sessionId && this.state.status === "in_call") return "cc-status-in-call";
+        return "cc-status-idle";
     },
 
     _schedulePoll() {
@@ -189,7 +209,7 @@ Module.register("MMM-CareConnect", {
 
     async _pollPending() {
         try {
-            if (this.state.sessionId) return; 
+            if (this.state.sessionId) return;
             const res = await this._mirrorFetch(`/api/mirror/rtc/pending?device=${encodeURIComponent(this._deviceName())}`);
             if (!res || !res.ok || !res.json) return;
             const items = Array.isArray(res.json.items) ? res.json.items : [];
@@ -234,12 +254,15 @@ Module.register("MMM-CareConnect", {
                 this._setError("Failed to send alert.");
                 return;
             }
-            this.state.info = "Alert sent ✓";
+            this.state.info = "Alert sent";
         } catch (e) {
             this._setError(`Alert failed: ${e && e.message ? e.message : String(e)}`);
         } finally {
             this.updateDom(0);
-            setTimeout(() => { this.state.info = ""; this.updateDom(0); }, 2500);
+            setTimeout(() => {
+                this.state.info = "";
+                this.updateDom(0);
+            }, 2500);
         }
     },
 
@@ -254,7 +277,9 @@ Module.register("MMM-CareConnect", {
             const el = document.getElementById("ccRemoteAudio");
             if (!el) return;
             el.srcObject = evt.streams[0];
-            try { el.play().catch(() => {}); } catch (_) {}
+            try {
+                el.play().catch(() => {});
+            } catch (_) {}
         };
 
         pc.onicecandidate = async (evt) => {
@@ -449,7 +474,9 @@ Module.register("MMM-CareConnect", {
             const items = Array.isArray(res.json.items) ? res.json.items : [];
             for (const it of items) {
                 if (!it || !it.candidate) continue;
-                try { await this.state.pc.addIceCandidate(it.candidate); } catch (_) {}
+                try {
+                    await this.state.pc.addIceCandidate(it.candidate);
+                } catch (_) {}
             }
             this.state.iceSince = Number(res.json.next || this.state.iceSince) || this.state.iceSince;
         } catch (_) {}
@@ -470,11 +497,17 @@ Module.register("MMM-CareConnect", {
             }
         } catch (_) {}
 
-        try { if (this.state.pc) this.state.pc.close(); } catch (_) {}
+        try {
+            if (this.state.pc) this.state.pc.close();
+        } catch (_) {}
         this.state.pc = null;
 
         if (this.state.localStream) {
-            this.state.localStream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
+            this.state.localStream.getTracks().forEach((t) => {
+                try {
+                    t.stop();
+                } catch (_) {}
+            });
         }
         this.state.localStream = null;
 
