@@ -47,8 +47,8 @@ Module.register("MMM-CareConnect", {
         if (notification === "AUDIOCALL_START_REQUEST") this._startCall();
         if (notification === "AUDIOCALL_ACCEPT_REQUEST") this._acceptIncoming();
         if (notification === "AUDIOCALL_DECLINE_REQUEST") this._declineIncoming();
-        if (notification === "AUDIOCALL_HANGUP_REQUEST") this._hangup("voice_hangup");
-        if (notification === "CARE_ALERT_SEND" && payload && payload.message) {
+        if (notification === "AUDIOCALL_END_REQUEST") this._hangup("voice_hangup");
+        if (notification === "SR_CARE_ALERT" && payload && payload.message) {
             this._sendCareAlert(String(payload.message), payload.level || "help");
         }
     },
