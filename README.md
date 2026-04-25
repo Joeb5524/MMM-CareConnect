@@ -11,7 +11,7 @@ Carers see alerts/calls in the hub dashboard. If you do not run a hub anywhere, 
 ## Installation
 1) Copy `MMM-CareConnect` into your `modules/` directory.
 2) Ensure the hub is reachable and configured with a `mirrorToken`.
-
+3) Where the config says "CHANGE-ME" change this token to a long random string as an identifier.
 ## Config example
 
 ```js
