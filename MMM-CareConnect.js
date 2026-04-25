@@ -57,30 +57,55 @@ Module.register("MMM-CareConnect", {
         const root = document.createElement("div");
         root.className = "cc-root";
 
-        const header = document.createElement("div");
-        header.className = "cc-header";
-        header.textContent = "Care";
-        root.appendChild(header);
+        const shell = document.createElement("div");
+        shell.className = "cc-shell";
+        root.appendChild(shell);
 
-        const err = document.createElement("div");
-        err.className = "cc-error";
-        err.style.display = this.state.lastError ? "block" : "none";
-        err.textContent = this.state.lastError || "";
-        root.appendChild(err);
+        const topline = document.createElement("div");
+        topline.className = "cc-topline";
 
-        const status = document.createElement("div");
-        status.className = `cc-status ${this._statusClass()}`;
+        const kicker = document.createElement("div");
+        kicker.className = "cc-kicker";
+        kicker.textContent = this._badgeText();
+        topline.appendChild(kicker);
 
-        const statusDot = document.createElement("span");
-        statusDot.className = "cc-status-dot";
-        status.appendChild(statusDot);
+        const badge = document.createElement("div");
+        badge.className = `cc-badge ${this._statusClass()}`;
+        badge.textContent = this._badgeText();
+        topline.appendChild(badge);
+        shell.appendChild(topline);
 
-        const statusLabel = document.createElement("span");
-        statusLabel.className = "cc-status-label";
-        statusLabel.textContent = this._statusText();
-        status.appendChild(statusLabel);
+        const title = document.createElement("div");
+        title.className = "cc-title";
+        title.textContent = this._headlineText();
+        shell.appendChild(title);
 
-        root.appendChild(status);
+        const subtitle = document.createElement("div");
+        subtitle.className = "cc-subtitle";
+        subtitle.textContent = this._subtitleText();
+        shell.appendChild(subtitle);
+
+        const summary = document.createElement("div");
+        summary.className = `cc-summary ${this.state.lastError ? "cc-summary-error" : ""} ${this.state.incoming ? "cc-summary-incoming" : ""}`;
+
+        const summaryLabel = document.createElement("div");
+        summaryLabel.className = "cc-summary-label";
+        summaryLabel.textContent = this._summaryLabel();
+        summary.appendChild(summaryLabel);
+
+        const summaryText = document.createElement("div");
+        summaryText.className = "cc-summary-text";
+        summaryText.textContent = this._summaryText();
+        summary.appendChild(summaryText);
+
+        shell.appendChild(summary);
+
+        if (this.state.lastError) {
+            const err = document.createElement("div");
+            err.className = "cc-error";
+            err.textContent = this.state.lastError;
+            shell.appendChild(err);
+        }
 
         const btnGrid = document.createElement("div");
         btnGrid.className = "cc-grid";
@@ -101,7 +126,7 @@ Module.register("MMM-CareConnect", {
             btnGrid.appendChild(callBtn);
         }
 
-        root.appendChild(btnGrid);
+        shell.appendChild(btnGrid);
 
         if (this.state.incoming && this.state.incoming.id) {
             const overlay = document.createElement("div");
@@ -129,7 +154,7 @@ Module.register("MMM-CareConnect", {
             actions.appendChild(decline);
             overlay.appendChild(actions);
 
-            root.appendChild(overlay);
+            shell.appendChild(overlay);
         }
 
         const audio = document.createElement("audio");
@@ -191,6 +216,50 @@ Module.register("MMM-CareConnect", {
         if (this.state.sessionId && this.state.status === "in_call") return "In call";
         if (this.state.info) return this.state.info;
         return "Idle";
+    },
+
+    _badgeText() {
+        if (this.state.lastError) return "ERROR";
+        if (this.state.incoming) return "INCOMING";
+        if (this.state.sessionId && this.state.status === "calling") return "CALLING";
+        if (this.state.sessionId && this.state.status === "ringing") return "RINGING";
+        if (this.state.sessionId && this.state.status === "in_call") return "IN CALL";
+        if (this.state.info) return "READY";
+        return "READY";
+    },
+
+    _headlineText() {
+        if (this.state.lastError) return "Attention needed";
+        if (this.state.incoming) return "Incoming call";
+        if (this.state.sessionId && this.state.status === "calling") return "Calling carer";
+        if (this.state.sessionId && this.state.status === "ringing") return "Waiting for answer";
+        if (this.state.sessionId && this.state.status === "in_call") return "Voice call active";
+        return "Care connect ready";
+    },
+
+    _subtitleText() {
+        if (this.state.lastError) return "Check the hub connection or try again.";
+        if (this.state.incoming) return "Choose accept or decline.";
+        if (this.state.sessionId && this.state.status === "calling") return "Dialling the care hub.";
+        if (this.state.sessionId && this.state.status === "ringing") return "Waiting for the carer to answer.";
+        if (this.state.sessionId && this.state.status === "in_call") return "Audio link is live.";
+        if (this.state.info) return this.state.info;
+        return "Tap an alert button to send a message.";
+    },
+
+    _summaryLabel() {
+        if (this.state.lastError) return "LAST ERROR";
+        if (this.state.incoming) return "LAST HEARD";
+        if (this.state.sessionId) return "LAST STATUS";
+        return "LAST HEARD";
+    },
+
+    _summaryText() {
+        if (this.state.lastError) return this.state.lastError;
+        if (this.state.incoming) return "Incoming call waiting";
+        if (this.state.sessionId) return this._statusText();
+        if (this.state.info) return this.state.info;
+        return "No alert sent yet.";
     },
 
     _statusClass() {
