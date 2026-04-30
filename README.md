@@ -1,18 +1,18 @@
 # MMM-CareConnect
 
-Combined **Care Alerts + WebRTC Audio Calling** module for MagicMirror².
+Care alerts and WebRTC audio calling for MagicMirror2.
 
+## Hub Dependency
 
-It is designed to talk to a hub (carer web UI + storage + signaling), typically **MMM-SimpleRemote**.
-
-## Hub dependency
-Carers see alerts/calls in the hub dashboard. If you do not run a hub anywhere, there is no carer web interface.
+The module is designed to use `MMM-SimpleRemote` as its hub. Carers see alerts and calls in the SimpleRemote dashboard.
 
 ## Installation
-1) Copy `MMM-CareConnect` into your `modules/` directory.
-2) Ensure the hub is reachable and configured with a `mirrorToken`.
-3) Where the config says "CHANGE-ME" change this token to a long random string as an identifier.
-## Config example
+
+1. Copy `MMM-CareConnect` into the MagicMirror `modules/` directory.
+2. Add `MMM-SimpleRemote` to the mirror config.
+3. Use the same `mirrorToken` value in both modules.
+
+## Config Example
 
 ```js
 {
@@ -20,7 +20,7 @@ Carers see alerts/calls in the hub dashboard. If you do not run a hub anywhere, 
   position: "fullscreen_above",
   config: {
     basePath: "/mm-simple-remote",
-    mirrorToken: "CHANGE_ME"
+    mirrorToken: "CHANGE_ME_SHARED_TOKEN"
   }
 },
 {
@@ -28,7 +28,7 @@ Carers see alerts/calls in the hub dashboard. If you do not run a hub anywhere, 
   position: "top_right",
   config: {
     hubBasePath: "/mm-simple-remote",
-    mirrorToken: "CHANGE_ME",
+    mirrorToken: "CHANGE_ME_SHARED_TOKEN",
     alertButtons: [
       { label: "Need help", message: "I need assistance.", level: "help" },
       { label: "Call me", message: "Please call me.", level: "call" }
@@ -37,9 +37,14 @@ Carers see alerts/calls in the hub dashboard. If you do not run a hub anywhere, 
 }
 ```
 
-## Voice control compatibility
-The module listens for:
-- `SR_CARE_ALERT` (for alert requests)
-- `AUDIOCALL_START_REQUEST`, `AUDIOCALL_ACCEPT_REQUEST`, `AUDIOCALL_DECLINE_REQUEST`, `AUDIOCALL_END_REQUEST`
+## Voice Control Compatibility
 
-So existing voice control integrations keep working.
+The module listens for:
+
+- `SR_CARE_ALERT`
+- `AUDIOCALL_START_REQUEST`
+- `AUDIOCALL_ACCEPT_REQUEST`
+- `AUDIOCALL_DECLINE_REQUEST`
+- `AUDIOCALL_END_REQUEST`
+
+These notifications are emitted by `MMM-VoiceControl`.
